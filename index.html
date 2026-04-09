@@ -9,10 +9,10 @@
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        // 🔥 重要：請在此處填入你 Firebase 專案的真實配置
+        // 🔥 請將此處內容替換為你 Firebase 專案的真實 SDK 配置
         const firebaseConfig = {
             apiKey: "你的API_KEY",
             authDomain: "你的PROJECT_ID.firebaseapp.com",
@@ -22,83 +22,86 @@
             appId: "你的APP_ID"
         };
 
-        // 初始化 Firebase
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
         const appId = 'nsjh-board-v2';
 
-        // 🛠️ Ably 配置 (用於在線人數監控)
+        // 🛠️ Ably 配置 (保留第一版參數)
         const ABLY_KEY = '2eR4lg.LsxDLQ:um2A4_AugjiGw4kjkgAuw56q7AAGGTJa_rAHv0fk7UA';
         const ADMIN_PWD = '123';
         const myId = 'NSJH-' + Math.random().toString(36).substr(2, 6).toUpperCase();
         const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: myId });
         const channel = ably.channels.get('nsjh-main-v7');
 
-        // 全域狀態管理
         window.currentCat = '🌿 生活';
         let secretCounter = 0;
         let currentUser = null;
 
-        // 1. 身份驗證：匿名登入以使用 Firestore
+        // 1. 初始化 Firebase 匿名身份驗證
         signInAnonymously(auth).catch(e => console.error("Auth failed", e));
 
         onAuthStateChanged(auth, (user) => {
             currentUser = user;
             if (user) {
-                console.log("Firebase 已連線");
-                syncMessages(); // 登入成功後開始同步訊息
+                console.log("Firebase 雲端已連線");
+                document.getElementById('status-text').innerText = "雲端同步中";
+                syncMessages();
             }
         });
 
-        // 2. Ably 即時連線狀態
+        // 2. Ably 在線狀態監控
         ably.connection.on('connected', () => {
             const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
             if(dot) {
                 dot.classList.replace('bg-slate-300', 'bg-green-500');
                 dot.classList.add('animate-pulse');
-            }
-            if(text) {
-                text.innerText = "雲端同步中";
-                text.classList.replace('text-slate-400', 'text-green-600');
             }
             channel.presence.enter();
         });
 
         channel.presence.subscribe(() => {
             channel.presence.get((err, members) => {
-                if (err) return;
-                const counterEl = document.getElementById('online-counter');
-                if(counterEl) counterEl.innerText = `目前在線: ${members.length} 人`;
+                if (!err && document.getElementById('online-counter')) {
+                    document.getElementById('online-counter').innerText = `目前在線: ${members.length} 人`;
+                }
             });
         });
 
-        // 3. 核心功能：從 Firebase 即時拉取訊息
+        // 3. 即時同步雲端資料庫訊息
         function syncMessages() {
             const msgCol = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
-            // 按時間排序，只取最新 50 則
-            const q = query(msgCol, orderBy("timestamp", "desc"), limit(50));
+            const q = query(msgCol, orderBy("timestamp", "desc"), limit(40));
 
             onSnapshot(q, (snapshot) => {
                 const list = document.getElementById('message-list');
-                list.innerHTML = ''; // 重新渲染以確保排序正確
+                list.innerHTML = '';
                 snapshot.forEach(doc => {
-                    displayMessage(doc.data(), doc.id);
+                    const data = doc.data();
+                    const html = `
+                        <div class="post-card bg-white p-6 shadow-sm border border-slate-100 flex flex-col mb-4">
+                            <div class="flex justify-between items-center mb-3">
+                                <span class="text-[10px] font-black text-slate-400 tracking-widest uppercase bg-slate-50 px-2 py-1 rounded-md border border-slate-100">${data.cat}</span>
+                                <span class="text-[9px] font-bold text-slate-300">${data.time || ''}</span>
+                            </div>
+                            <p class="text-slate-700 font-bold text-[15px] mb-4 leading-relaxed">${escape(data.content)}</p>
+                            <div class="text-[10px] font-black text-blue-600/50 italic border-t border-slate-50 pt-3">
+                                ${escape(data.cls)} · ${escape(data.name)}
+                            </div>
+                        </div>`;
+                    list.insertAdjacentHTML('beforeend', html);
                 });
-            }, (error) => {
-                console.error("同步失敗:", error);
             });
         }
 
-        // 4. 發布功能：寫入 Firebase
+        // 4. 發布至雲端資料庫
         window.broadcast = async function() {
             const cls = document.getElementById('input-class').value.trim();
             const name = document.getElementById('input-name').value.trim();
             const content = document.getElementById('input-content').value.trim();
 
             if (!cls || !name || !content) return alert('不能留白唷！');
-            if (!currentUser) return alert('雲端初始化中，請稍候...');
+            if (!currentUser) return alert('初始化中，請稍候...');
 
             const payload = {
                 timestamp: Date.now(),
@@ -114,29 +117,11 @@
                 document.getElementById('input-content').value = '';
                 localStorage.setItem('nsjh_user', JSON.stringify({cls, name}));
             } catch (e) {
-                console.error("發布失敗:", e);
-                alert("發布失敗，請確認 Firebase 資料庫規則已開啟。");
+                console.error("發布失敗", e);
+                alert("發布失敗，請確認 Firebase 規則權限。");
             }
         }
 
-        function displayMessage(data, docId) {
-            const list = document.getElementById('message-list');
-            const html = `
-                <div id="msg-${docId}" class="post-card bg-white p-6 shadow-sm border border-slate-100 flex flex-col mb-4">
-                    <div class="flex justify-between items-center mb-3">
-                        <span class="text-[10px] font-black text-slate-400 tracking-widest uppercase bg-slate-50 px-2 py-1 rounded-md border border-slate-100">${escape(data.cat)}</span>
-                        <span class="text-[9px] font-bold text-slate-300">${data.time}</span>
-                    </div>
-                    <p class="text-slate-700 font-bold text-[15px] mb-4 leading-relaxed">${escape(data.content)}</p>
-                    <div class="text-[10px] font-black text-blue-600/50 italic border-t border-slate-50 pt-3">
-                        ${escape(data.cls)} · ${escape(data.name)}
-                    </div>
-                </div>
-            `;
-            list.insertAdjacentHTML('beforeend', html);
-        }
-
-        // UI 互動函式
         window.setCategory = function(btn, name) {
             document.querySelectorAll('#cat-tabs button').forEach(b => b.classList.remove('active-cat'));
             btn.classList.add('active-cat');
@@ -146,7 +131,7 @@
         window.handleAdminTrigger = function() {
             secretCounter++;
             if (secretCounter >= 5) {
-                const pass = prompt("請輸入管理員通行密碼：");
+                const pass = prompt("管理員通行密碼：");
                 if (pass === ADMIN_PWD) {
                     document.getElementById('admin-area').style.display = 'block';
                 }
@@ -160,25 +145,20 @@
             return t.innerHTML;
         }
 
-        // 初始化表單預填
-        window.addEventListener('load', () => {
+        window.onload = () => {
             const user = JSON.parse(localStorage.getItem('nsjh_user') || '{}');
             if(user.cls) document.getElementById('input-class').value = user.cls;
             if(user.name) document.getElementById('input-name').value = user.name;
-        });
+        };
     </script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
         body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; }
-        .post-card { animation: slideIn 0.3s ease-out forwards; border-radius: 1.5rem; }
+        .post-card { animation: slideIn 0.3s ease-out; border-radius: 1.5rem; }
         @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .active-cat { background-color: #2563eb !important; color: white !important; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
-        .admin-panel { display: none; }
-        .fab-container { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 100; display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-end; }
-        .fab-button { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-        .fab-button:hover { transform: translateY(-3px); filter: brightness(1.1); }
     </style>
 </head>
 <body class="min-h-screen pb-40">
@@ -188,53 +168,44 @@
             <h1 onclick="handleAdminTrigger()" class="font-black text-2xl tracking-tighter text-slate-800 cursor-pointer select-none">
                 南勢國中即時看板 <span class="text-blue-600">CLOUD</span>
             </h1>
-            <div class="flex items-center gap-4">
-                <div class="text-right">
-                    <div id="status-tag" class="inline-flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full text-[10px] font-black text-slate-400">
-                        <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
-                        <span id="status-text">連線中</span>
-                    </div>
-                    <div id="online-counter" class="text-[10px] font-bold text-blue-500 mt-1 uppercase tracking-tighter">在線人數: --</div>
+            <div class="text-right">
+                <div id="status-tag" class="inline-flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full text-[10px] font-black text-slate-400">
+                    <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                    <span id="status-text">初始化中</span>
                 </div>
+                <div id="online-counter" class="text-[10px] font-bold text-blue-500 mt-1 uppercase tracking-tighter">在線人數: --</div>
             </div>
         </div>
     </nav>
 
-    <div id="admin-area" class="admin-panel max-w-xl mx-auto px-4 mb-8">
+    <div id="admin-area" class="hidden max-w-xl mx-auto px-4 mb-8">
         <div class="bg-slate-900 text-white p-6 rounded-[2rem] border-4 border-slate-800">
-            <h2 class="text-xl font-black text-amber-400 mb-2">管理控制台</h2>
-            <p class="text-xs text-slate-400">目前訊息已實作 Firebase 雲端永久保存功能。</p>
-            <button onclick="document.getElementById('admin-area').style.display='none'" class="mt-4 bg-slate-700 px-4 py-2 rounded-xl text-xs font-bold">關閉</button>
+            <h2 class="text-xl font-black text-amber-400">管理控制台</h2>
+            <p class="text-xs text-slate-400 mt-2">目前訊息由 Firebase 持久保存。</p>
+            <button onclick="document.getElementById('admin-area').style.display='none'" class="mt-4 bg-slate-700 px-4 py-1 rounded-full text-xs font-bold">關閉</button>
         </div>
     </div>
 
     <section class="max-w-xl mx-auto px-4 mb-8">
-        <div class="bg-white rounded-[2rem] p-6 shadow-xl shadow-blue-900/5 border border-white">
+        <div class="bg-white rounded-[2rem] p-6 shadow-xl border border-white">
             <div class="flex gap-2 overflow-x-auto no-scrollbar mb-6" id="cat-tabs">
-                <button onclick="setCategory(this, '🌿 生活')" class="active-cat whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🌿 生活</button>
-                <button onclick="setCategory(this, '💖 告白')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">💖 告白</button>
-                <button onclick="setCategory(this, '📢 公告')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">📢 公告</button>
-                <button onclick="setCategory(this, '📚 課業')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">📚 課業</button>
+                <button onclick="setCategory(this, '🌿 生活')" class="active-cat whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500">🌿 生活</button>
+                <button onclick="setCategory(this, '💖 告白')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500">💖 告白</button>
+                <button onclick="setCategory(this, '📢 公告')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500">📢 公告</button>
+                <button onclick="setCategory(this, '📚 課業')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500">📚 課業</button>
             </div>
             <div class="grid grid-cols-2 gap-3 mb-4">
-                <input type="text" id="input-class" placeholder="班級" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm border border-transparent focus:bg-white focus:ring-2 ring-blue-500/20 transition-all">
-                <input type="text" id="input-name" placeholder="名字" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm border border-transparent focus:bg-white focus:ring-2 ring-blue-500/20 transition-all">
+                <input type="text" id="input-class" placeholder="班級" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm">
+                <input type="text" id="input-name" placeholder="名字" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm">
             </div>
-            <textarea id="input-content" rows="2" placeholder="發佈一則雲端貼文..." class="w-full p-4 bg-slate-50 rounded-2xl outline-none mb-4 text-sm font-medium border border-transparent focus:bg-white focus:ring-2 ring-blue-500/20 transition-all"></textarea>
-            <button onclick="broadcast()" class="w-full bg-slate-900 hover:bg-blue-600 text-white font-black py-4 rounded-2xl shadow-lg active:scale-[0.98] transition-all">
+            <textarea id="input-content" rows="2" placeholder="發佈至雲端看板..." class="w-full p-4 bg-slate-50 rounded-2xl outline-none mb-4 text-sm font-medium"></textarea>
+            <button onclick="broadcast()" class="w-full bg-slate-900 hover:bg-blue-600 text-white font-black py-4 rounded-2xl shadow-lg transition-all active:scale-[0.98]">
                 🚀 發佈並同步至全校
             </button>
         </div>
     </section>
 
     <main id="message-list" class="max-w-xl mx-auto px-4"></main>
-
-    <div class="fab-container">
-        <a href="你的表單網址" target="_blank" class="fab-button flex items-center gap-2 bg-amber-500 text-white px-5 py-3 rounded-full shadow-lg border-2 border-white/20 active:scale-95">
-            <span class="text-lg">⚠️</span>
-            <span class="font-black text-sm">問題回報</span>
-        </a>
-    </div>
 
 </body>
 </html>
