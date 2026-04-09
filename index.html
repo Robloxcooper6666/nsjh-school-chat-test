@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>南勢國中即時看板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.ably.com/lib/ably.min-1.js"></script>
+    <!-- 引入 Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, orderBy, limit, doc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Firebase 配置
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'nsjh-board-v2';
+
+        // 🛠️ Ably 配置
+        const ABLY_KEY = '2eR4lg.LsxDLQ:um2A4_AugjiGw4kjkgAuw56q7AAGGTJa_rAHv0fk7UA';
+        const ADMIN_PWD = '123';
+
+        const myId = 'NSJH-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+        const ably = new Ably.Realtime({ key: ABLY_KEY, clientId: myId });
+        const channel = ably.channels.get('nsjh-main-v7');
+
+        window.currentCat = '🌿 生活';
+        let secretCounter = 0;
+        let currentUser = null;
+        let displayedMsgIds = new Set(); // 用於防止訊息重複顯示
+
+        // 1. 初始化身份驗證
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInAnonymously(auth);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) {
+                console.error("Auth failed", e);
+            }
+        }
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) {
+                // 當身分確認後，開始從雲端同步訊息
+                syncMessages();
+            }
+        });
+
+        // 2. Ably 即時連線狀態
+        ably.connection.on('connected', () => {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            if(dot) {
+                dot.classList.replace('bg-slate-300', 'bg-green-500');
+                dot.classList.add('animate-pulse');
+            }
+            if(text) text.innerText = "雲端同步中";
+            channel.presence.enter();
+        });
+
+        channel.presence.subscribe(() => {
+            channel.presence.get((err, members) => {
+                if (err) return;
+                const count = members.length;
+                const counterEl = document.getElementById('online-counter');
+                if(counterEl) counterEl.innerText = `目前在線: ${count} 人`;
+            });
+        });
+
+        // 3. 核心功能：雲端永久同步 (類似 LINE 的訊息拉取)
+        function syncMessages() {
+            if (!currentUser) return;
+            const msgCol = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+
+            // 使用 onSnapshot 監聽最新變動 (這會抓取歷史記錄並監聽新訊息)
+            onSnapshot(msgCol, (snapshot) => {
+                const newMessages = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    data.id = doc.id; // 使用 Firestore 的文件 ID
+                    newMessages.push(data);
+                });
+
+                // 按時間排序 (最新在最上面)
+                newMessages.sort((a, b) => b.timestamp - a.timestamp);
+
+                // 渲染到畫面上
+                const list = document.getElementById('message-list');
+                // 這裡我們不建議每次都 innerHTML = ''，但在簡易版中這是最安全防重複的方法
+                list.innerHTML = '';
+                displayedMsgIds.clear();
+
+                newMessages.forEach(msg => {
+                    displayMessage(msg);
+                });
+            }, (error) => {
+                console.error("同步失敗:", error);
+            });
+        }
+
+        // 4. 發布功能
+        window.broadcast = async function() {
+            const cls = document.getElementById('input-class').value.trim();
+            const name = document.getElementById('input-name').value.trim();
+            const content = document.getElementById('input-content').value.trim();
+
+            if (!cls || !name || !content) return alert('內容不能空白喔！');
+            if (!currentUser) return alert('連線初始化中，請稍候...');
+
+            const payload = {
+                timestamp: Date.now(),
+                cat: window.currentCat,
+                cls: cls,
+                name: name,
+                content: content,
+                time: new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            };
+
+            try {
+                // 直接存入雲端資料庫，onSnapshot 會自動讓所有人的螢幕更新
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'messages'), payload);
+
+                // 清空輸入框
+                document.getElementById('input-content').value = '';
+                localStorage.setItem('nsjh_user', JSON.stringify({cls, name}));
+            } catch (e) {
+                console.error("發布出錯:", e);
+                alert("發布失敗，請再試一次");
+            }
+        }
+
+        function displayMessage(data) {
+            const list = document.getElementById('message-list');
+            // 防止重複顯示
+            if (displayedMsgIds.has(data.id)) return;
+            displayedMsgIds.add(data.id);
+
+            const html = `
+                <div class="post-card bg-white p-6 shadow-sm border border-slate-100 flex flex-col mb-4">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="text-[10px] font-black text-slate-400 tracking-widest uppercase bg-slate-50 px-2 py-1 rounded-md border border-slate-100">${data.cat}</span>
+                        <span class="text-[9px] font-bold text-slate-300">${data.time}</span>
+                    </div>
+                    <p class="text-slate-700 font-bold text-[15px] mb-4 leading-relaxed">${escape(data.content)}</p>
+                    <div class="text-[10px] font-black text-blue-600/50 italic border-t border-slate-50 pt-3">
+                        ${escape(data.cls)} · ${escape(data.name)}
+                    </div>
+                </div>
+            `;
+            list.insertAdjacentHTML('beforeend', html); // 排序已在 syncMessages 處理好，按順序加入即可
+        }
+
+        window.setCategory = function(btn, name) {
+            document.querySelectorAll('#cat-tabs button').forEach(b => b.classList.remove('active-cat'));
+            btn.classList.add('active-cat');
+            window.currentCat = name;
+        }
+
+        window.handleAdminTrigger = function() {
+            secretCounter++;
+            if (secretCounter >= 5) {
+                const pass = prompt("管理員通行密碼：");
+                if (pass === ADMIN_PWD) {
+                    document.getElementById('admin-area').style.display = 'block';
+                }
+                secretCounter = 0;
+            }
+        }
+
+        function escape(s) {
+            const t = document.createElement('p');
+            t.textContent = s;
+            return t.innerHTML;
+        }
+
+        window.addEventListener('load', () => {
+            const user = JSON.parse(localStorage.getItem('nsjh_user') || '{}');
+            if(user.cls) document.getElementById('input-class').value = user.cls;
+            if(user.name) document.getElementById('input-name').value = user.name;
+        });
+
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; }
+        .post-card { animation: slideIn 0.3s ease-out forwards; border-radius: 1.5rem; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .active-cat { background-color: #2563eb !important; color: white !important; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .admin-panel { display: none; }
+
+        .fab-container {
+            position: fixed;
+            bottom: 1.5rem;
+            right: 1.5rem;
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            align-items: flex-end;
+        }
+        .fab-button {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .fab-button:hover { transform: translateY(-3px); filter: brightness(1.1); }
+    </style>
+</head>
+<body class="min-h-screen pb-40">
+
+    <nav class="bg-white/90 backdrop-blur-md sticky top-0 z-50 border-b border-slate-200 px-4 py-4 mb-6 shadow-sm">
+        <div class="max-w-xl mx-auto flex justify-between items-center">
+            <h1 onclick="handleAdminTrigger()" class="font-black text-2xl tracking-tighter text-slate-800 cursor-pointer select-none">
+                南勢國中即時看板 <span class="text-blue-600">CLOUD</span>
+            </h1>
+            <div class="flex items-center gap-4">
+                <div class="text-right">
+                    <div id="status-tag" class="inline-flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full text-[10px] font-black text-slate-400">
+                        <span id="status-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                        <span id="status-text">連線中</span>
+                    </div>
+                    <div id="online-counter" class="text-[10px] font-bold text-blue-500 mt-1 uppercase tracking-tighter">
+                        在線人數: --
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div id="admin-area" class="admin-panel max-w-xl mx-auto px-4 mb-8">
+        <div class="bg-slate-900 text-white p-6 rounded-[2rem] border-4 border-slate-800">
+            <h2 class="text-xl font-black text-amber-400 mb-4">管理控制台</h2>
+            <p class="text-xs text-slate-400">所有訊息目前已存儲於 Firebase Cloud Firestore，實現 LINE 等級的永久保存。</p>
+            <button onclick="location.reload()" class="mt-4 bg-slate-700 px-4 py-2 rounded-xl text-xs font-bold">關閉</button>
+        </div>
+    </div>
+
+    <section class="max-w-xl mx-auto px-4 mb-8">
+        <div class="bg-white rounded-[2rem] p-6 shadow-xl shadow-blue-900/5 border border-white">
+            <div class="flex gap-2 overflow-x-auto no-scrollbar mb-6" id="cat-tabs">
+                <button onclick="setCategory(this, '🌿 生活')" class="active-cat whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🌿 生活</button>
+                <button onclick="setCategory(this, '💖 告白')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">💖 告白</button>
+                <button onclick="setCategory(this, '📢 公告')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">📢 公告</button>
+                <button onclick="setCategory(this, '📚 課業')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">📚 課業</button>
+                <button onclick="setCategory(this, '🏀 運動')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🏀 運動</button>
+                <button onclick="setCategory(this, '🎮 遊戲')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🎮 遊戲</button>
+                <button onclick="setCategory(this, '🎨 藝術')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🎨 藝術</button>
+                <button onclick="setCategory(this, '🤣 梗圖')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🤣 梗圖</button>
+                <button onclick="setCategory(this, '🤫 秘密')" class="whitespace-nowrap px-4 py-2 rounded-xl border-2 border-slate-100 text-xs font-black text-slate-500 transition-all">🤫 秘密</button>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+                <input type="text" id="input-class" placeholder="班級" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm">
+                <input type="text" id="input-name" placeholder="名字" class="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold text-sm">
+            </div>
+            <textarea id="input-content" rows="2" placeholder="發佈一則永久貼文..." class="w-full p-4 bg-slate-50 rounded-2xl outline-none mb-4 text-sm font-medium"></textarea>
+            <button onclick="broadcast()" class="w-full bg-slate-900 hover:bg-blue-600 text-white font-black py-4 rounded-2xl shadow-lg transition-all">
+                🚀 發佈並同步至全校
+            </button>
+        </div>
+    </section>
+
+    <!-- 訊息清單 -->
+    <main id="message-list" class="max-w-xl mx-auto px-4"></main>
+
+    <div class="fab-container">
+        <a href="https://docs.google.com/forms/d/e/1FAIpQLSfVdJKPBpUTQW44wfvPzzb6Oo3dEpRyJDZhlaavA51dYOK5Xw/viewform?usp=header" target="_blank" class="fab-button flex items-center gap-2 bg-amber-500 text-white px-5 py-3 rounded-full shadow-lg border-2 border-white/20">
+            <span class="text-lg">⚠️</span>
+            <span class="font-black text-sm">問題回報</span>
+        </a>
+    </div>
+
+</body>
+</html>
